@@ -47,7 +47,7 @@ python run.py [-h] -u example@example.org -p 12345 -f diving_logs.csv -t custom_
     - "dive_type": Type of dive, how did you get in the water ("Boat", "Shore" or "Other");
     - "dive_title": Dive title, name of your dive;
     - "dive_location": Name of the dive location;
-    - "dive_date": Date of your dive ("MM/DD/YYYY");
+    - "date": Date of your dive ("DD.MM.YYYY");
   - **Depth/Time (required):**
     - "max_depth": Max dive depth, how deep did you go;
     - "bottom_time": Bottom time, how long was your dive;
@@ -84,8 +84,9 @@ python run.py [-h] -u example@example.org -p 12345 -f diving_logs.csv -t custom_
     - "buddies": Who did you go with;
     - "dive_center": What dive center did you dive with?
 
-## Future plans
+## TODO
 
+- Refresh access token after 60min;
 - Add support for log files from diving computers;
 
 ## Disclaimer
