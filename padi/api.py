@@ -1,5 +1,10 @@
 import requests, json
+import pandas as pd
 from bs4 import BeautifulSoup
+from datetime import datetime
+from tqdm import tqdm
+
+from utils.helpers import get_data_param
 
 LOGIN_HEADERS = {
     "Host": "www.padi.com",
@@ -12,15 +17,15 @@ LOGIN_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none"
 }
-
 REGULAR_HEADERS = { 'Content-Type': 'application/json' }
+DATE_FORMAT = "%Y-%m-%dT%H:%M:%S.000Z"
 
 class PADI_API:
-    def __init__(self, data_format):
+    def __init__(self):
         self.session = requests.session()
         self.client_id = None
         self.bearer_token = None
-        self.data_format = data_format
+        self.affiliate_id = None
 
         # get client id
         r = self.session.get('https://www.padi.com/', headers=LOGIN_HEADERS)
@@ -29,9 +34,23 @@ class PADI_API:
         drupal_settings_json = json.loads(drupal_settings.text)
         self.client_id = drupal_settings_json['padi_sso']['ssoClientId']
 
+    def __get_auth_header(self):
+        return {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer {0}'.format(self.bearer_token),
+        }
+
     def __error(self, message):
         print('ERROR: {0}'.format(message))
         quit()
+
+    def __get_affiliation_id(self):
+        headers = self.__get_auth_header()
+        r = self.session.get('https://ecard.global-prod.padi.com/api/eCard/GeteCardListConsumer', headers=headers, allow_redirects=True)
+        json_response = json.loads(r.content)
+        if (r.status_code != 200):
+            self.__error(json_response['message'])
+        return json_response['affiliateSummary']['affiliateID']
 
     def login(self, username, password):
         login_payload = {
@@ -52,17 +71,15 @@ class PADI_API:
             self.__error(json_response['message'])
 
         self.bearer_token = json_response['tokens']['idToken']
+        self.affiliate_id = self.__get_affiliation_id()
 
-    def __create_basic_dive_entry(self, headers):
-
-        #TODO: affiliate_id?
-        #TODO: created_date?
-
-        # first request to create a new entry
-        minimum_dive_data = {"query":"mutation insert_logbook_logs($general: [logbook_logs_insert_input!]!) {\n  insert_logbook_logs(objects: $general) {\n    affected_rows\n    returning {\n      id\n      affiliate_id\n      dive_title\n      dive_type\n      dive_location\n      log_type\n      log_course\n      dive_date\n      created_date\n      status\n      adventure_dive\n    }\n  }\n}","variables":{"general":{"affiliate_id":"28140789","log_type":"Recreational","created_date":"2024-03-14T09:09:43.449Z","dive_type":"Boat","dive_title":"dive title","dive_location":"dive site","dive_date":"03/14/2024","status":"Publish"}}}
+    # creating an empty base entry
+    def __create_basic_dive_entry(self, data):
+        created_date = datetime.now().strftime(DATE_FORMAT)
+        minimum_dive_data = {"query":"mutation insert_logbook_logs($general: [logbook_logs_insert_input!]!) {\n  insert_logbook_logs(objects: $general) {\n    affected_rows\n    returning {\n      id\n      affiliate_id\n      dive_title\n      dive_type\n      dive_location\n      log_type\n      log_course\n      dive_date\n      created_date\n      status\n      adventure_dive\n    }\n  }\n}","variables":{"general":{"affiliate_id":self.affiliate_id,"log_type":"Recreational","created_date":created_date,"dive_type":data.dive_type,"dive_title":data.dive_title,"dive_location":data.dive_location,"dive_date":data.date,"status":"Publish"}}}
         r = self.session.post(
             'https://logbook.global-prod.padi.com/api/Logbook',
-            headers=headers,
+            headers=self.__get_auth_header(),
             data=json.dumps(minimum_dive_data),
             allow_redirects=True
         )
@@ -74,24 +91,49 @@ class PADI_API:
         created_entry_data = response['data']['insert_logbook_logs']['returning'][0]
         self.last_dive_entry_id = int(created_entry_data['id'])
 
-    def __populate_dive_entry(self, headers):
-        # second request to populate it with data
-        minimum_dive_data = {"query":"mutation RemainingSection($depthTime: [logbook_depth_time_insert_input!]!, $conditions: [logbook_conditions_insert_input!]!, $equipment: [logbook_equipment_insert_input!]!, $experience: [logbook_experience_insert_input!]!) {\n  insert_logbook_depth_time(objects: $depthTime) {\n    affected_rows\n  }\n  insert_logbook_conditions(objects: $conditions) {\n    affected_rows\n  }\n  insert_logbook_equipment(objects: $equipment) {\n    affected_rows\n  }\n  insert_logbook_experience(objects: $experience) {\n    affected_rows\n  }\n}","variables":{"depthTime":{"bottom_time":"50","max_depth":"39","logs_id":self.last_dive_entry_id},"conditions":{"water_type":"Salt","body_of_water":"Ocean","weather":"Sunny","air_temp":"32","surface_water_temp":None,"bottom_water_temp":"27","visibility":"Average","visibility_distance":"20","wave_condition":"MediumWaves","current":"MediumCurrent","surge":None,"logs_id":self.last_dive_entry_id},"equipment":{"starting_pressure":"210","ending_pressure":"50","suit_type":"FullSuit_5mm","weight":"10","weight_type":"Good","additional_equipment":"{Gloves,Boots}","cylinder_type":"Aluminum","cylinder_size":"12","gas_mixture":"Enriched","oxygen":"32","nitrogen":"68","helium":"0","logs_id":self.last_dive_entry_id},"experience":{"feeling":"Good","notes":"here is a diving note","buddies":"Marina","dive_center":"Sadko","logs_id":self.last_dive_entry_id}}}
+    # populating empty entry with data
+    def __populate_dive_entry(self, data):
+        data_structure = {
+            'depthTime': ["bottom_time", "max_depth"],
+            'conditions': ["water_type", "body_of_water", "weather", "air_temp", "surface_water_temp", "bottom_water_temp", "visibility", "visibility_distance", "wave_condition", "current", "surge"],
+            'equipment': ["starting_pressure","ending_pressure","suit_type","weight","weight_type","additional_equipment","cylinder_type","cylinder_size","gas_mixture","oxygen","nitrogen","helium"],
+            'experience': ["feeling", "notes", "buddies", "dive_center"]
+        }
+
+        variables = {}
+
+        for key in data_structure:
+            if key not in variables: variables[key] = {}
+            columns = data_structure[key]
+            variables[key]['logs_id'] = self.last_dive_entry_id # default param, which should be in every section
+            for el in columns:
+                value = get_data_param(data, el)
+                if (el == 'additional_equipment'): value = '{%s}' % value # edge case for additional equipment array
+                if value != None and str(value) != 'nan': variables[key][el] = value
+
+        all_dive_data = {"query":"mutation RemainingSection($depthTime: [logbook_depth_time_insert_input!]!, $conditions: [logbook_conditions_insert_input!]!, $equipment: [logbook_equipment_insert_input!]!, $experience: [logbook_experience_insert_input!]!) {\n  insert_logbook_depth_time(objects: $depthTime) {\n    affected_rows\n  }\n  insert_logbook_conditions(objects: $conditions) {\n    affected_rows\n  }\n  insert_logbook_equipment(objects: $equipment) {\n    affected_rows\n  }\n  insert_logbook_experience(objects: $experience) {\n    affected_rows\n  }\n}","variables":variables}
+
         r = self.session.post(
             'https://logbook.global-prod.padi.com/api/Logbook',
-            headers=headers,
-            data=json.dumps(minimum_dive_data),
+            headers=self.__get_auth_header(),
+            data=json.dumps(all_dive_data),
             allow_redirects=True
         )
         response = json.loads(r.content)
         if 'errors' in response:
             self.__error(response['errors'][0]['message'])
-        print(r.content)
 
-    def add_dive(self):
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer {0}'.format(self.bearer_token),
-        }
-        self.__create_basic_dive_entry(headers)
-        self.__populate_dive_entry(headers)
+    # add a single dive entry
+    def __add_dive(self, data):
+        self.__create_basic_dive_entry(data)
+        self.__populate_dive_entry(data)
+
+    # add all the dives from the log file
+    def add_dives(self, file_path, data_format):
+        if (data_format == 'custom_csv'):
+            df = pd.read_csv(file_path) 
+            # reformat date into padi format
+            df['date'] = pd.to_datetime(df['date'], format='%d.%m.%Y').dt.strftime('%m/%d/%Y')
+
+            for index, data in tqdm(df.iterrows(), total=df.shape[0]):
+                self.__add_dive(data)
